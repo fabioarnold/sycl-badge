@@ -13,43 +13,46 @@ pub fn main() !void {
     defer args.deinit();
 
     _ = args.next();
-    var in_files = std.ArrayList(ConvertFile).init(allocator);
+    var in_files: std.ArrayList(ConvertFile) = .empty;
     var out_path: []const u8 = undefined;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-i")) {
             const path = args.next() orelse return error.MissingArg;
             const bits = args.next() orelse return error.MissingArg;
             const transparency = args.next() orelse return error.MissingArg;
-            try in_files.append(.{ .path = path, .bits = @intCast(bits[0] - '0'), .transparency = transparency[0] == 't' });
+            try in_files.append(allocator, .{ .path = path, .bits = @intCast(bits[0] - '0'), .transparency = transparency[0] == 't' });
         } else if (std.mem.eql(u8, arg, "-o")) {
             out_path = args.next() orelse return error.MissingArg;
         }
     }
-    std.debug.print("{s}\n", .{out_path});
 
     const out_file = try std.fs.cwd().createFile(out_path, .{});
     defer out_file.close();
 
-    const writer = out_file.writer();
+    var writer_buf: [4096]u8 = undefined;
+    var out_file_writer = out_file.writer(&writer_buf);
+    const writer = &out_file_writer.interface;
     try writer.writeAll("const PackedIntSlice = @import(\"packed_int_array\").PackedIntSlice;\n");
     try writer.writeAll("const DisplayColor = @import(\"cart-api\").DisplayColor;\n\n");
 
     for (in_files.items) |in_file| {
         try convert(in_file, writer);
     }
+    try writer.flush();
 }
 
-fn convert(args: ConvertFile, writer: std.fs.File.Writer) !void {
+fn convert(args: ConvertFile, writer: *std.Io.Writer) !void {
     const N = 8 / args.bits;
 
-    var image = try Image.fromFilePath(allocator, args.path);
-    defer image.deinit();
+    var buffer: [4096]u8 = undefined;
+    var image = try Image.fromFilePath(allocator, args.path, &buffer);
+    defer image.deinit(allocator);
 
-    var colors = std.ArrayList(Color).init(allocator);
-    defer colors.deinit();
-    if (args.transparency) try colors.append(.{ .r = 31, .g = 0, .b = 31 });
-    var indices = try std.ArrayList(usize).initCapacity(allocator, image.width * image.height);
-    defer indices.deinit();
+    var colors: std.ArrayList(Color) = .empty;
+    defer colors.deinit(allocator);
+    if (args.transparency) try colors.append(allocator, .{ .r = 31, .g = 0, .b = 31 });
+    var indices: std.ArrayList(usize) = try .initCapacity(allocator, image.width * image.height);
+    defer indices.deinit(allocator);
     var it = image.iterator();
     while (it.next()) |pixel| {
         const color = Color{
@@ -60,7 +63,6 @@ fn convert(args: ConvertFile, writer: std.fs.File.Writer) !void {
         const index = try getIndex(&colors, color);
         indices.appendAssumeCapacity(index);
     }
-    std.debug.print("{} colors: {any}\n", .{ colors.items.len, colors.items });
     var packed_data = try allocator.alloc(u8, indices.items.len / N);
     defer allocator.free(packed_data);
     for (packed_data, 0..) |_, i| {
@@ -111,6 +113,6 @@ fn getIndex(colors: *std.ArrayList(Color), color: Color) !usize {
     for (colors.items, 0..) |c, i| {
         if (c.eql(color)) return i;
     }
-    try colors.append(color);
+    try colors.append(allocator, color);
     return colors.items.len - 1;
 }
